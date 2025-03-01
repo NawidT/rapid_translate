@@ -1,0 +1,4 @@
+pytest-playwright
+langchain
+langchain_openai
+langgraph

@@ -1,0 +1,6 @@
+{
+    "python.analysis.autoImportCompletions": true,
+    "cursor.cmdk.useThemedDiffBackground": true,
+    "workbench.colorTheme": "Default Dark+",
+    "workbench.preferredDarkColorTheme": "Default Dark+"
+}
