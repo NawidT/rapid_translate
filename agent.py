@@ -22,6 +22,7 @@ class RT_Graph(StateGraph):
         self.add_node("set_context_html", self.set_context_html)
         self.add_node("set_context_img", self.set_context_img)
         self.add_node("decide_if_selected_is_message_box", self.decide_if_selected_is_message_box)
+        self.add_node("translate_message", self.translate_message)
         self.add_node("wait", self.handle_wait)
         # add the chat
         self.chat = ChatOpenAI(model="gpt-4o-mini", temperature=0, api_key=os.getenv("OPENAI_API_KEY"))
@@ -35,9 +36,11 @@ class RT_Graph(StateGraph):
             "decide_if_selected_is_message_box",
             self.cond_edge_is_messbox,
         )
+        self.add_edge("translate_message", "set_selected_element")
         self.add_edge("wait", "set_selected_element")
         # additional attributes
         self.page = None
+        self.language_to_translate_to = "Spanish"
 
 
     def set_page(self, page : Page):
@@ -46,7 +49,7 @@ class RT_Graph(StateGraph):
     async def set_selected_element(self, state : RT_State):
         """ Sets the tag name of the element currently selected by the mouse om the selected_element field of the state """
         if self.page and isinstance(self.page, Page):
-            selected_elem = await self.page.evaluate("document.activeElement?.tagName?.toLowerCase() || ''")
+            selected_elem = await self.page.evaluate("document.activeElement?.tagName? || ''")
             state['selected_element'] = selected_elem
         print("page: ", self.page)
         print("set selected element: ", selected_elem)
@@ -88,9 +91,9 @@ class RT_Graph(StateGraph):
                 set_context_html - to find the html of the page
                 set_context_img - to find the screenshot of the page
                     
-                If you think the selected element is a text box, return True 
+                If you think the selected element is a text box, return translate_message 
                 If you think you need to use a tool, return the name of the tool
-                Otherwise, return False
+                Otherwise, return wait
         """.format(selected_element=state['selected_element']))
         )
         state['messages'].append(
@@ -100,15 +103,34 @@ class RT_Graph(StateGraph):
         print("ans: ", ans.content.strip())
         state['messages'].append(ans)
         return state
+    
+    async def translate_message(self, state : RT_State):
+        """ Translates the message in the selected element to Spanish """
+        print(state['selected_element'])
+        eval_str = "document.getElementsByTagName('{selected_element}')[0]".format(selected_element=state['selected_element'])
+        if self.page and isinstance(self.page, Page):
+            raw_value = await self.page.evaluate(eval_str + ".value")
+            print("raw_value: ", raw_value)
+            text_to_translate = raw_value.split(" -> ")[0]
+            print("text_to_translate: ", text_to_translate)
+            state['messages'].append(
+                HumanMessage(content=f"Please translate the message: {text_to_translate} to {self.language_to_translate_to}. 
+                             Keep the format of english_text -> spanish_text")
+            )
+            translated_text = self.chat.invoke(state['messages'])
+            print("translated_text: ", translated_text.content.strip())
+            state['messages'].append(translated_text)
+            self.page.locator(eval_str).fill(translated_text.content.strip())
+        return state
 
     def cond_edge_is_messbox(self, state : RT_State):
         if state['messages'][-1].tool_calls:
             print("tool call")
             print(state['messages'][-1].tool_calls)
             return state['messages'][-1].tool_calls[0].name
-        elif state['messages'][-1].content.strip() == "True":
+        elif state['messages'][-1].content.strip() == "translate_message":
             print("THIS IS A MESSAGE BOX")
-            return "wait"
+            return "translate_message"
         else:
             print("no tool call")
             return "wait"
