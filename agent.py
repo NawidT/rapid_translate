@@ -40,7 +40,7 @@ class RT_Graph(StateGraph):
         self.add_edge("wait", "set_selected_element")
         # additional attributes
         self.page = None
-        self.language_to_translate_to = "Spanish"
+        self.language_to_translate_to = "Mandarin"
 
 
     def set_page(self, page : Page):
@@ -50,6 +50,8 @@ class RT_Graph(StateGraph):
         """ Sets the tag name of the element currently selected by the mouse om the selected_element field of the state """
         if self.page and isinstance(self.page, Page):
             selected_elem = await self.page.evaluate("document.activeElement?.tagName")
+            if str(selected_elem).lower() == "input":
+                selected_elem = await self.page.evaluate("document.activeElement?.className")
             state['selected_element'] = selected_elem
         print("page: ", self.page)
         print("set selected element: ", selected_elem)
@@ -61,6 +63,7 @@ class RT_Graph(StateGraph):
         print("get context html")
         if self.page and isinstance(self.page, Page):
             context_html = await self.page.evaluate("document.activeElement?.outerHTML")
+            print("context_html: ", context_html)
             state['context_html'] = context_html
             state['messages'].append(HumanMessage(content=f"Here is the inner html of the element: {context_html}"))
         return state
@@ -94,6 +97,8 @@ class RT_Graph(StateGraph):
                 If you think the selected element is a text box, return translate_message 
                 If you think you need to use a tool, return the name of the tool
                 Otherwise, return wait
+                          
+                RETURN ONLY ONE WORD: translate_message, set_context_html, set_context_img, or wait
         """.format(selected_element=state['selected_element']))
         )
         state['messages'].append(
@@ -107,21 +112,35 @@ class RT_Graph(StateGraph):
     async def translate_message(self, state : RT_State):
         """ Translates the message in the selected element to Spanish """
         print(state['selected_element'])
-        eval_str = "document.getElementsByTagName('{selected_element}')[0]".format(selected_element=state['selected_element'])
+        if "input" in state['selected_element'].lower():
+            eval_str = "{selected_element} input[type=text]".format(selected_element=state['selected_element'])
+        else:
+            eval_str = "input.{selected_element}".format(selected_element=state['selected_element'])
         if self.page and isinstance(self.page, Page):
-            raw_value = await self.page.evaluate(eval_str + ".value")
-            print("raw_value: ", raw_value)
-            if raw_value:
-                text_to_translate = raw_value.split(" -> ")[0]
-                print("text_to_translate: ", text_to_translate)
-                state['messages'].append(
-                    HumanMessage(content=f"""Please translate the message: {text_to_translate} to {self.language_to_translate_to}. 
-                                Keep the format of english_text -> spanish_text""")
-                )
-                translated_text = self.chat.invoke(state['messages'])
-                print("translated_text: ", translated_text.content.strip())
-                state['messages'].append(translated_text)
-                self.page.locator(eval_str).fill(translated_text.content.strip())
+            try:
+                await self.page.wait_for_selector(eval_str, state='visible', timeout=5000)
+            except:
+                print("element not found")
+                return state
+            try:
+                raw_value = await self.page.locator(eval_str).input_value()
+                print("raw_value: ", raw_value)
+                if raw_value:
+                    # handle translating the text
+                    text_to_translate = raw_value.split(" -> ")[1] if len(raw_value.split(" -> ")) > 1 else raw_value.split(" -> ")[0]
+                    print("text_to_translate: ", text_to_translate)
+                    state['messages'].append(
+                        HumanMessage(content=f"""Please translate the message: {text_to_translate} to {self.language_to_translate_to}. 
+                                    Return in the format [{self.language_to_translate_to} Text] -> [English Text]""")
+                    )
+                    translated_text = self.chat.invoke(state['messages'])
+                    print("translated_text: ", translated_text.content.strip())
+                    state['messages'].append(translated_text)
+                    # fill the text box with the translated text
+                    await self.page.locator(eval_str).fill(translated_text.content.strip())
+            except:
+                print("error in translating message")
+                return state
         return state
 
     def cond_edge_is_messbox(self, state : RT_State):
@@ -137,9 +156,9 @@ class RT_Graph(StateGraph):
             return "wait"
         
     async def handle_wait(self, state : RT_State):
-        print("waiting")
-        # keep only the last 4 messages to get historical context
-        state['messages'] = state['messages'][-4:]
+        print("------------------------------------------------")
+        # keep only the last 3 messages to get historical context
+        state['messages'] = state['messages'][-1:]
         # print("Chat so far: ", [message.content + " -> " for message in state['messages']])
         await asyncio.sleep(10)
         return state
