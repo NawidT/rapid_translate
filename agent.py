@@ -36,7 +36,7 @@ class RT_Graph(StateGraph):
             "decide_if_selected_is_message_box",
             self.cond_edge_is_messbox,
         )
-        self.add_edge("translate_message", "set_selected_element")
+        self.add_edge("translate_message", "wait")
         self.add_edge("wait", "set_selected_element")
         # additional attributes
         self.page = None
@@ -49,7 +49,7 @@ class RT_Graph(StateGraph):
     async def set_selected_element(self, state : RT_State):
         """ Sets the tag name of the element currently selected by the mouse om the selected_element field of the state """
         if self.page and isinstance(self.page, Page):
-            selected_elem = await self.page.evaluate("document.activeElement?.tagName? || ''")
+            selected_elem = await self.page.evaluate("document.activeElement?.tagName")
             state['selected_element'] = selected_elem
         print("page: ", self.page)
         print("set selected element: ", selected_elem)
@@ -60,7 +60,7 @@ class RT_Graph(StateGraph):
         """ Sets the inner html of the element currently selected by the mouse on the context_html field of the state """
         print("get context html")
         if self.page and isinstance(self.page, Page):
-            context_html = await self.page.evaluate("document.activeElement?.outerHTML || ''    ")
+            context_html = await self.page.evaluate("document.activeElement?.outerHTML")
             state['context_html'] = context_html
             state['messages'].append(HumanMessage(content=f"Here is the inner html of the element: {context_html}"))
         return state
@@ -111,16 +111,17 @@ class RT_Graph(StateGraph):
         if self.page and isinstance(self.page, Page):
             raw_value = await self.page.evaluate(eval_str + ".value")
             print("raw_value: ", raw_value)
-            text_to_translate = raw_value.split(" -> ")[0]
-            print("text_to_translate: ", text_to_translate)
-            state['messages'].append(
-                HumanMessage(content=f"Please translate the message: {text_to_translate} to {self.language_to_translate_to}. 
-                             Keep the format of english_text -> spanish_text")
-            )
-            translated_text = self.chat.invoke(state['messages'])
-            print("translated_text: ", translated_text.content.strip())
-            state['messages'].append(translated_text)
-            self.page.locator(eval_str).fill(translated_text.content.strip())
+            if raw_value:
+                text_to_translate = raw_value.split(" -> ")[0]
+                print("text_to_translate: ", text_to_translate)
+                state['messages'].append(
+                    HumanMessage(content=f"""Please translate the message: {text_to_translate} to {self.language_to_translate_to}. 
+                                Keep the format of english_text -> spanish_text""")
+                )
+                translated_text = self.chat.invoke(state['messages'])
+                print("translated_text: ", translated_text.content.strip())
+                state['messages'].append(translated_text)
+                self.page.locator(eval_str).fill(translated_text.content.strip())
         return state
 
     def cond_edge_is_messbox(self, state : RT_State):
