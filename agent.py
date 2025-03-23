@@ -40,11 +40,19 @@ class RT_Graph(StateGraph):
         self.add_edge("wait", "set_selected_element")
         # additional attributes
         self.page = None
-        self.language_to_translate_to = "Mandarin"
+        self.language_to_translate_to = "Arabic"
 
 
     def set_page(self, page : Page):
         self.page = page
+
+    async def check_selected_element(self):
+        """ Checks and returns the selected element has changed """
+        if self.page and isinstance(self.page, Page):
+            selected_element = await self.page.evaluate("document.activeElement?.tagName")
+            if str(selected_element).lower() == "input":
+                selected_element = await self.page.evaluate("document.activeElement?.className")
+        return selected_element
 
     async def set_selected_element(self, state : RT_State):
         """ Sets the tag name of the element currently selected by the mouse om the selected_element field of the state """
@@ -87,19 +95,21 @@ class RT_Graph(StateGraph):
         state['messages'].append(
             SystemMessage(content="""
                 Is the selected element a message box?, You are an agent being used to translate a message as its being typed in a message box.
-                You need to decide if the selected element is a message box. You have may have access to the following information:
+                You need to decide if the selected element is a message box. Do use the tools at hand in case you feel unsure what the selected element is. 
+                You have may have access to the following information:
+                
                 Name of the selected element: {selected_element}
                     
                 You have the following tools at your disposal:
                 set_context_html - to find the html of the page
                 set_context_img - to find the screenshot of the page
                     
-                If you think the selected element is a text box, return translate_message 
+                If you think the selected element is a text box, return translate_message
                 If you think you need to use a tool, return the name of the tool
                 Otherwise, return wait
                           
                 RETURN ONLY ONE WORD: translate_message, set_context_html, set_context_img, or wait
-        """.format(selected_element=state['selected_element']))
+                """.format(selected_element=state['selected_element']))
         )
         state['messages'].append(
             HumanMessage(content="Is the selected element a message box?")
@@ -141,6 +151,15 @@ class RT_Graph(StateGraph):
             except:
                 print("error in translating message")
                 return state
+            
+        # wait for 10 seconds and then check if the selected element has changed
+        await asyncio.sleep(10)
+        state['selected_element'] = await self.page.evaluate("document.activeElement?.tagName")
+        if str(state['selected_element']).lower() == "input":
+            state['selected_element'] = await self.page.evaluate("document.activeElement?.className")
+        if state['selected_element'] != "INPUT":
+            return state
+
         return state
 
     def cond_edge_is_messbox(self, state : RT_State):
@@ -161,4 +180,60 @@ class RT_Graph(StateGraph):
         state['messages'] = state['messages'][-1:]
         # print("Chat so far: ", [message.content + " -> " for message in state['messages']])
         await asyncio.sleep(10)
+        return state
+
+
+class RT_State_v2(TypedDict):
+    current_element_tag : str
+    context_html : str
+    context_img : str
+    messages : list[BaseMessage]
+    time_of_last_translation : int
+    last_translation_text : str
+    last_edited_page_url : str
+
+class RT_Graph_v2(StateGraph):
+    def __init__(self):
+        super().__init__(RT_State)
+        # add the node
+        # add the chat
+        self.chat = ChatOpenAI(model="gpt-4o-mini", temperature=0, api_key=os.getenv("OPENAI_API_KEY"))
+        # self.chat = self.chat.bind_tools([self.set_context_html, self.set_context_img])
+        # add the edges
+
+        # additional attributes
+        self.page = None
+        self.language_to_translate_to = "Bengali"
+
+
+    async def main_loop(self, state : RT_State_v2):
+        """ Main loop for the agent """
+        while True:
+            # check 
+            selected_elem = await self.page.evaluate("document.activeElement?.tagName")
+
+
+    @tool
+    async def set_context_html(self, state : RT_State):
+        """ Sets the inner html of the element currently selected by the mouse on the context_html field of the state """
+        print("get context html")
+        if self.page and isinstance(self.page, Page):
+            context_html = await self.page.evaluate("document.activeElement?.outerHTML")
+            print("context_html: ", context_html)
+            state['context_html'] = context_html
+            state['messages'].append(HumanMessage(content=f"Here is the inner html of the element: {context_html}"))
+        return state
+
+    @tool
+    def set_context_img(self, state : RT_State):
+        """ Sets the image of the element currently selected by the mouse on the context_img field of the state """
+        print("get context img")
+        if self.page and isinstance(self.page, Page):
+            context_img = self.page.screenshot()
+            # pass thru an LLM to describe the image
+            llm = ChatOpenAI(model="gpt-4o-mini", temperature=0, api_key=os.getenv("OPENAI_API_KEY"))
+            img_desc = llm.invoke(context_img)
+            state['context_img'] = img_desc
+            print("img_desc: ", img_desc)
+            state['messages'].append(HumanMessage(content=f"Here is the description of the image of the element: {img_desc}"))
         return state
