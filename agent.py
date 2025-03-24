@@ -7,6 +7,8 @@ import os
 from playwright.async_api import Page
 from typing_extensions import TypedDict
 import asyncio
+import time
+import json
 
 class RT_State(TypedDict):
     selected_element : str
@@ -41,7 +43,6 @@ class RT_Graph(StateGraph):
         # additional attributes
         self.page = None
         self.language_to_translate_to = "Arabic"
-
 
     def set_page(self, page : Page):
         self.page = page
@@ -202,19 +203,86 @@ class RT_Graph_v2(StateGraph):
         # add the edges
 
         # additional attributes
+        self.cur_state = "translate" # options are tool_call|translate|wait
         self.page = None
         self.language_to_translate_to = "Bengali"
 
 
+    def set_page(self, page : Page):
+        self.page = page
+
     async def main_loop(self, state : RT_State_v2):
         """ Main loop for the agent """
         while True:
-            # check 
-            selected_elem = await self.page.evaluate("document.activeElement?.tagName")
+            # prepare data to feed to the LLM
+            
+            state['current_element_tag'] = await self.page.evaluate("document.activeElement?.tagName")
 
+
+            # feed all data to the LLM
+
+            state['messages'].append(
+                            msg = SystemMessage(content="""
+                You are an agent being used to decide whether to activate a translate function that extracts text and translates it in real time as its being typed in a message box. You need to be fast and efficient.
+                The tool you're being used for updates text the user types every 3 to 6 seconds, while the user is in typing session. You must determine whether the user is in typing session. Feel free to sue the tools 
+                to get more information about the user's situation. You can use tools to get a screenshot of the page and the html of the page. If you think the user is done with typing session, you should wait.
+                If you think the user is typing, you must translate the text.
+
+                You have access to the following information:
+                Name of the selected element: {current_element_tag}
+                Time since last translation: {time_since_last_edit}
+                                
+                Consider previous messages to help you make a decision, if a tool has recently been used don't use it again.
+                
+                You have the following tools at your disposal:
+                set_context_html - to find the html of the page
+                set_context_img - to find the screenshot of the page
+                
+                RETURN IN THE FOLLOWING FORMAT: 
+                {{
+                    "state" : [translate, set_context_html, set_context_img, wait]
+                    "reasoning" : [why you chose the state you did]
+                }}
+                
+            """.format(
+                current_element_tag=state['current_element_tag'], 
+                time_since_last_edit=str(time.time() - state['time_of_last_translation']), 
+            )))
+            ai_result = self.chat.invoke(state['messages'])
+            count = 0
+            tool_calls = []
+            while count < 3:
+                try:
+                    if len(ai_result.content) > 0:
+                        resp = json.loads(ai_result.content)
+                        print(resp)
+                    else:
+                        tool_calls.extend([tc['name'] for tc in ai_result.tool_calls])
+                    break
+                except:
+                    count += 1
+                    ai_result = self.chat.invoke(state['messages'])
+                    continue
+            
+            # execute the actions the LLM choses and update the state
+            if ai_result['state'] == "translate":
+                state = await self.translate_message(state)
+            elif len(tool_calls) > 0:
+                for tool_call in tool_calls:
+                    if tool_call == "set_context_html":
+                        state = await self.set_context_html(state)
+                    elif tool_call == "set_context_img":
+                        state = await self.set_context_img(state)           
+            elif ai_result['state'] == "wait":
+                await asyncio.sleep(10)
+            
+            
+
+    def optimize_message_chain(self, state : RT_State_v2):
+        pass
 
     @tool
-    async def set_context_html(self, state : RT_State):
+    async def set_context_html(self, state : RT_State_v2):
         """ Sets the inner html of the element currently selected by the mouse on the context_html field of the state """
         print("get context html")
         if self.page and isinstance(self.page, Page):
@@ -225,7 +293,7 @@ class RT_Graph_v2(StateGraph):
         return state
 
     @tool
-    def set_context_img(self, state : RT_State):
+    def set_context_img(self, state : RT_State_v2):
         """ Sets the image of the element currently selected by the mouse on the context_img field of the state """
         print("get context img")
         if self.page and isinstance(self.page, Page):
@@ -237,3 +305,56 @@ class RT_Graph_v2(StateGraph):
             print("img_desc: ", img_desc)
             state['messages'].append(HumanMessage(content=f"Here is the description of the image of the element: {img_desc}"))
         return state
+
+    async def translate_message(self, state : RT_State_v2):
+        """ Translates the message in the selected element to Spanish """
+
+        # find the element selected by the mouse
+        if "input" in state['current_element_tag'].lower():
+            eval_str = "{current_element_tag} input[type=text]".format(current_element_tag=state['current_element_tag'])
+        else:
+            eval_str = "input.{current_element_tag}".format(current_element_tag=state['current_element_tag'])
+        if self.page and isinstance(self.page, Page):
+            # wait for the element to be visible
+            try:
+                await self.page.wait_for_selector(eval_str, state='visible', timeout=5000)
+            except:
+                print("element not found")
+                return state
+            # get the text from the element
+            try:
+                raw_value = await self.page.locator(eval_str).input_value()
+                print("raw_value: ", raw_value)
+                if raw_value:
+                    # handle translating the text
+                    text_to_translate = raw_value.split(" -> ")[1] if len(raw_value.split(" -> ")) > 1 else raw_value.split(" -> ")[0]
+                    print("text_to_translate: ", text_to_translate)
+                    state['last_translation_text'] = text_to_translate
+            except:
+                print("error in getting the text from the element")
+                return state
+            # translate the text
+            try:
+                translated_text = self.chat.invoke([HumanMessage(
+                    content=f"""Please translate the message: {text_to_translate} to {self.language_to_translate_to}. 
+                                Return in the format [{self.language_to_translate_to} Text] -> [English Text]""")])
+                
+                state['last_translation_text'] = translated_text.content.strip()
+                state['time_of_last_translation'] = int(time.time())
+                # update the messages list
+                state['messages'].append(HumanMessage(content=f"Here is the translated text: {translated_text} from {text_to_translate}".format(
+                    translated_text=translated_text.content.strip(), 
+                    text_to_translate=text_to_translate
+                )))
+            except:
+                print("error in translating the text")
+                return state
+            # fill the text in the element
+            try:
+                await self.page.locator(eval_str).fill(state['last_translation_text'])
+            except:
+                print("error in filling the text in the element")
+                return state
+            # wait for 3 seconds then return
+            await asyncio.sleep(3)
+            return state        
