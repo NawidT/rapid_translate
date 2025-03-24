@@ -189,19 +189,17 @@ class RT_State_v2(TypedDict):
     context_html : str
     context_img : str
     messages : list[BaseMessage]
-    time_of_last_translation : int
-    last_translation_text : str
-    last_edited_page_url : str
 
 class RT_Graph_v2(StateGraph):
     def __init__(self):
         super().__init__(RT_State)
         # add the node
+        self.add_node("main_loop", self.main_loop)
         # add the chat
         self.chat = ChatOpenAI(model="gpt-4o-mini", temperature=0, api_key=os.getenv("OPENAI_API_KEY"))
         # self.chat = self.chat.bind_tools([self.set_context_html, self.set_context_img])
         # add the edges
-
+        self.add_edge(START, "main_loop")
         # additional attributes
         self.cur_state = "translate" # options are tool_call|translate|wait
         self.page = None
@@ -218,25 +216,23 @@ class RT_Graph_v2(StateGraph):
             
             state['current_element_tag'] = await self.page.evaluate("document.activeElement?.tagName")
 
-
             # feed all data to the LLM
 
-            state['messages'].append(
-                            msg = SystemMessage(content="""
+            state['messages'].append(SystemMessage(
+                content="""
                 You are an agent being used to decide whether to activate a translate function that extracts text and translates it in real time as its being typed in a message box. You need to be fast and efficient.
                 The tool you're being used for updates text the user types every 3 to 6 seconds, while the user is in typing session. You must determine whether the user is in typing session. Feel free to sue the tools 
                 to get more information about the user's situation. You can use tools to get a screenshot of the page and the html of the page. If you think the user is done with typing session, you should wait.
                 If you think the user is typing, you must translate the text.
 
                 You have access to the following information:
-                Name of the selected element: {current_element_tag}
-                Time since last translation: {time_since_last_edit}
+                - Name of the selected element: {current_element_tag}
                                 
                 Consider previous messages to help you make a decision, if a tool has recently been used don't use it again.
                 
                 You have the following tools at your disposal:
-                set_context_html - to find the html of the page
-                set_context_img - to find the screenshot of the page
+                - set_context_html : to find the html of the page
+                - set_context_img : to find the screenshot of the page
                 
                 RETURN IN THE FOLLOWING FORMAT: 
                 {{
@@ -245,10 +241,10 @@ class RT_Graph_v2(StateGraph):
                 }}
                 
             """.format(
-                current_element_tag=state['current_element_tag'], 
-                time_since_last_edit=str(time.time() - state['time_of_last_translation']), 
+                current_element_tag=state['current_element_tag'] 
             )))
             ai_result = self.chat.invoke(state['messages'])
+            print("ai_result: ", ai_result)
             count = 0
             tool_calls = []
             while count < 3:
@@ -265,21 +261,33 @@ class RT_Graph_v2(StateGraph):
                     continue
             
             # execute the actions the LLM choses and update the state
-            if ai_result['state'] == "translate":
-                state = await self.translate_message(state)
-            elif len(tool_calls) > 0:
-                for tool_call in tool_calls:
-                    if tool_call == "set_context_html":
-                        state = await self.set_context_html(state)
-                    elif tool_call == "set_context_img":
-                        state = await self.set_context_img(state)           
-            elif ai_result['state'] == "wait":
-                await asyncio.sleep(10)
             
+            # if len(tool_calls) > 0:
+            #     for tool_call in tool_calls:
+            #         if tool_call == "set_context_html":
+            #             state = await self.set_context_html(state)
+            #         elif tool_call == "set_context_img":
+            #             state = await self.set_context_img(state) 
+            if ai_result.content:
+                resp = json.loads(ai_result.content)
+                if resp['state'] == "set_context_html":
+                    state = await self.set_context_html(state)
+                elif resp['state'] == "set_context_img":
+                    state = await self.set_context_img(state)
+                elif resp['state'] == "translate":
+                    state = await self.translate_message(state)
+                elif resp['state'] == "wait":
+                    await asyncio.sleep(10)
+            else:
+                await asyncio.sleep(3)
+            state = self.optimize_message_chain(state)
             
 
     def optimize_message_chain(self, state : RT_State_v2):
-        pass
+        """ Optimizes the message chain by using the last 6 messages """
+        # remove duplicate messages
+        state['messages'] = state['messages'][-6:]
+        return state
 
     @tool
     async def set_context_html(self, state : RT_State_v2):
@@ -289,7 +297,7 @@ class RT_Graph_v2(StateGraph):
             context_html = await self.page.evaluate("document.activeElement?.outerHTML")
             print("context_html: ", context_html)
             state['context_html'] = context_html
-            state['messages'].append(HumanMessage(content=f"Here is the inner html of the element: {context_html}"))
+            state['messages'].append(HumanMessage(content=f"After running the set_context_html tool, here is the inner html of the element: {context_html}"))
         return state
 
     @tool
@@ -303,7 +311,7 @@ class RT_Graph_v2(StateGraph):
             img_desc = llm.invoke(context_img)
             state['context_img'] = img_desc
             print("img_desc: ", img_desc)
-            state['messages'].append(HumanMessage(content=f"Here is the description of the image of the element: {img_desc}"))
+            state['messages'].append(HumanMessage(content=f"After running the set_context_img tool, here is the inner html of the element: {img_desc}"))
         return state
 
     async def translate_message(self, state : RT_State_v2):
