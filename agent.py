@@ -8,7 +8,7 @@ import os
 from playwright.async_api import Page
 from typing_extensions import TypedDict
 import asyncio
-from prompts import main_loop_feed
+from prompts import main_loop_feed, translation_prompt
 import json
 import base64
 
@@ -143,8 +143,10 @@ class RT_Graph(StateGraph):
                     text_to_translate = raw_value.split(" -> ")[1] if len(raw_value.split(" -> ")) > 1 else raw_value.split(" -> ")[0]
                     print("text_to_translate: ", text_to_translate)
                     state['messages'].append(
-                        HumanMessage(content=f"""Please translate the message: {text_to_translate} to {self.language_to_translate_to}. 
-                                    Return in the format [{self.language_to_translate_to} Text] -> [English Text]""")
+                        HumanMessage(content=translation_prompt.format(
+                            text_to_translate=text_to_translate,
+                            language_to_translate_to=self.language_to_translate_to
+                        ))
                     )
                     translated_text = self.chat.invoke(state['messages'])
                     print("translated_text: ", translated_text.content.strip())
@@ -336,8 +338,10 @@ class RT_Graph_v2(StateGraph):
             try:
                 translated_text = self.chat.invoke([
                     HumanMessage(
-                        content=f"""Please translate the message: {text_to_translate} to {self.language_to_translate_to}. 
-                        Return in the format {self.language_to_translate_to} Text -> English Text""")
+                        content=translation_prompt.format(
+                            text_to_translate=state['last_translation_text'],
+                            language_to_translate_to=self.language_to_translate_to
+                    ))
                 ])
                 state['last_translation_text'] = translated_text.content.strip()
                 print("translated_text: ", translated_text.content.strip())
