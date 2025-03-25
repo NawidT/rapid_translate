@@ -1,5 +1,6 @@
 from langgraph.graph import MessagesState, START, END, StateGraph
 from typing_extensions import TypedDict
+from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.tools import tool
 from langchain_core.messages import HumanMessage, AIMessage, SystemMessage, BaseMessage
 from langchain_openai import ChatOpenAI
@@ -7,8 +8,9 @@ import os
 from playwright.async_api import Page
 from typing_extensions import TypedDict
 import asyncio
-import time
+from prompts import main_loop_feed
 import json
+import base64
 
 class RT_State(TypedDict):
     selected_element : str
@@ -213,63 +215,35 @@ class RT_Graph_v2(StateGraph):
         """ Main loop for the agent """
         while True:
             # prepare data to feed to the LLM
-            
             state['current_element_tag'] = await self.page.evaluate("document.activeElement?.tagName")
 
             # feed all data to the LLM
-
-            state['messages'].append(SystemMessage(
-                content="""
-                You are an agent being used to decide whether to activate a translate function that extracts text and translates it in real time as its being typed in a message box. You need to be fast and efficient.
-                The tool you're being used for updates text the user types every 3 to 6 seconds, while the user is in typing session. You must determine whether the user is in typing session. Feel free to sue the tools 
-                to get more information about the user's situation. You can use tools to get a screenshot of the page and the html of the page. If you think the user is done with typing session, you should wait.
-                If you think the user is typing, you must translate the text.
-
-                You have access to the following information:
-                - Name of the selected element: {current_element_tag}
-                                
-                Consider previous messages to help you make a decision, if a tool has recently been used don't use it again.
-                
-                You have the following tools at your disposal:
-                - set_context_html : to find the html of the page
-                - set_context_img : to find the screenshot of the page
-                
-                RETURN IN THE FOLLOWING FORMAT: 
-                {{
-                    "state" : [translate, set_context_html, set_context_img, wait]
-                    "reasoning" : [why you chose the state you did]
-                }}
-                
-            """.format(
+            state['messages'].append(SystemMessage(content=main_loop_feed.format(
                 current_element_tag=state['current_element_tag'] 
             )))
             ai_result = self.chat.invoke(state['messages'])
-            print("ai_result: ", ai_result)
+            print("ai_result: ", ai_result.content)
             count = 0
-            tool_calls = []
+            resp = None
             while count < 3:
                 try:
                     if len(ai_result.content) > 0:
                         resp = json.loads(ai_result.content)
-                        print(resp)
-                    else:
-                        tool_calls.extend([tc['name'] for tc in ai_result.tool_calls])
-                    break
+                        # print("resp: ", resp)
+                        break
                 except:
+                    print("error in parsing the response")
                     count += 1
                     ai_result = self.chat.invoke(state['messages'])
                     continue
+            if count == 3:
+                print("failed to parse the response")
+                await asyncio.sleep(5)
+                continue
             
             # execute the actions the LLM choses and update the state
-            
-            # if len(tool_calls) > 0:
-            #     for tool_call in tool_calls:
-            #         if tool_call == "set_context_html":
-            #             state = await self.set_context_html(state)
-            #         elif tool_call == "set_context_img":
-            #             state = await self.set_context_img(state) 
-            if ai_result.content:
-                resp = json.loads(ai_result.content)
+             
+            if resp:
                 if resp['state'] == "set_context_html":
                     state = await self.set_context_html(state)
                 elif resp['state'] == "set_context_img":
@@ -277,11 +251,13 @@ class RT_Graph_v2(StateGraph):
                 elif resp['state'] == "translate":
                     state = await self.translate_message(state)
                 elif resp['state'] == "wait":
-                    await asyncio.sleep(10)
+                    await asyncio.sleep(6)
+                    state['messages'].append(HumanMessage(content="Waited for 6 seconds"))
             else:
                 await asyncio.sleep(3)
-            state = self.optimize_message_chain(state)
+                state['messages'].append(HumanMessage(content="Waited for 3 seconds"))
             
+            state = self.optimize_message_chain(state)
 
     def optimize_message_chain(self, state : RT_State_v2):
         """ Optimizes the message chain by using the last 6 messages """
@@ -289,26 +265,37 @@ class RT_Graph_v2(StateGraph):
         state['messages'] = state['messages'][-6:]
         return state
 
-    @tool
+    
     async def set_context_html(self, state : RT_State_v2):
         """ Sets the inner html of the element currently selected by the mouse on the context_html field of the state """
         print("get context html")
         if self.page and isinstance(self.page, Page):
             context_html = await self.page.evaluate("document.activeElement?.outerHTML")
+            if len(context_html) > 1000:
+                state['messages'].append(HumanMessage(content="The html is too long. The selected element is not a translatable element."))
+                return state
             print("context_html: ", context_html)
             state['context_html'] = context_html
-            state['messages'].append(HumanMessage(content=f"After running the set_context_html tool, here is the inner html of the element: {context_html}"))
+            state['messages'].append(HumanMessage(content=f"After running the set_context_html tool, here is the inner html of the element: {context_html}. Remember to translate the text if the element looks like a fillable text element."))
         return state
 
-    @tool
-    def set_context_img(self, state : RT_State_v2):
+    
+    async def set_context_img(self, state : RT_State_v2):
         """ Sets the image of the element currently selected by the mouse on the context_img field of the state """
         print("get context img")
         if self.page and isinstance(self.page, Page):
-            context_img = self.page.screenshot()
+            screenshot_bytes = await self.page.screenshot()
+            encoded_image = base64.b64encode(screenshot_bytes).decode('utf-8')
             # pass thru an LLM to describe the image
+            messages = [
+                SystemMessage(content="Describe the selected element in the image, if any element is selected. Also what is the text in the selected element."),
+                HumanMessage(content=[{
+                    "type": "image_url",
+                    "image_url": {"url": f"data:image/jpeg;base64,{encoded_image}"},
+                }])
+            ]
             llm = ChatOpenAI(model="gpt-4o-mini", temperature=0, api_key=os.getenv("OPENAI_API_KEY"))
-            img_desc = llm.invoke(context_img)
+            img_desc = llm.invoke(messages)
             state['context_img'] = img_desc
             print("img_desc: ", img_desc)
             state['messages'].append(HumanMessage(content=f"After running the set_context_img tool, here is the inner html of the element: {img_desc}"))
@@ -316,22 +303,26 @@ class RT_Graph_v2(StateGraph):
 
     async def translate_message(self, state : RT_State_v2):
         """ Translates the message in the selected element to Spanish """
-
+        print("translate message")
         # find the element selected by the mouse
-        if "input" in state['current_element_tag'].lower():
-            eval_str = "{current_element_tag} input[type=text]".format(current_element_tag=state['current_element_tag'])
+        if str(state['current_element_tag']).lower() == "input":
+            # get class name of the element
+            class_name = await self.page.evaluate("document.activeElement?.className")
+            eval_str = f"input.{class_name}"
         else:
-            eval_str = "input.{current_element_tag}".format(current_element_tag=state['current_element_tag'])
+            eval_str = f"{state['current_element_tag'].lower()} input[type='text']"
         if self.page and isinstance(self.page, Page):
             # wait for the element to be visible
             try:
-                await self.page.wait_for_selector(eval_str, state='visible', timeout=5000)
+                element = await self.page.wait_for_selector(eval_str, state='visible', timeout=5000)
             except:
                 print("element not found")
                 return state
             # get the text from the element
+            # the state "last_translation_text" is used to store the text to fill with. Stored in state for global access outside of try-catch
             try:
-                raw_value = await self.page.locator(eval_str).input_value()
+                # We should use .input_value() on the element handle instead
+                raw_value = await element.input_value()
                 print("raw_value: ", raw_value)
                 if raw_value:
                     # handle translating the text
@@ -343,23 +334,23 @@ class RT_Graph_v2(StateGraph):
                 return state
             # translate the text
             try:
-                translated_text = self.chat.invoke([HumanMessage(
-                    content=f"""Please translate the message: {text_to_translate} to {self.language_to_translate_to}. 
-                                Return in the format [{self.language_to_translate_to} Text] -> [English Text]""")])
-                
+                translated_text = self.chat.invoke([
+                    HumanMessage(
+                        content=f"""Please translate the message: {text_to_translate} to {self.language_to_translate_to}. 
+                        Return in the format {self.language_to_translate_to} Text -> English Text""")
+                ])
                 state['last_translation_text'] = translated_text.content.strip()
-                state['time_of_last_translation'] = int(time.time())
+                print("translated_text: ", translated_text.content.strip())
                 # update the messages list
-                state['messages'].append(HumanMessage(content=f"Here is the translated text: {translated_text} from {text_to_translate}".format(
-                    translated_text=translated_text.content.strip(), 
-                    text_to_translate=text_to_translate
-                )))
-            except:
-                print("error in translating the text")
+                state['messages'].append(
+                    HumanMessage(content=f"Here is the translated text: {translated_text.content.strip()} from {text_to_translate}")
+                )
+            except Exception as e:
+                print("error in translating the text: ", e)
                 return state
             # fill the text in the element
             try:
-                await self.page.locator(eval_str).fill(state['last_translation_text'])
+                await element.fill(state['last_translation_text'])
             except:
                 print("error in filling the text in the element")
                 return state
