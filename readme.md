@@ -48,29 +48,9 @@ The second implementation uses a more flexible, loop-based approach:
    - Smart waiting periods (3-10 seconds) based on context
    - Message chain optimization to prevent memory bloat
 
-## Technical Implementation
+## Determinitic Graph
 
-### Key Components
-```python
-class RT_State_v2(TypedDict):
-    current_element_tag : str
-    context_html : str
-    context_img : str
-    messages : list[BaseMessage]
-```
-
-### Element Selection Strategy
-```python
-if str(state['current_element_tag']).lower() == "input":
-    class_name = await self.page.evaluate("document.activeElement?.className")
-    eval_str = f"input.{class_name}"
-else:
-    eval_str = f"{state['current_element_tag'].lower()} input[type='text']"
-```
-
-## Usage
-
-[Add screenshots and usage instructions here]
+![LangGraph](https://github.com/NawidT/rapid_translate/blob/main/graph.png)
 
 ## Future Improvements
 
