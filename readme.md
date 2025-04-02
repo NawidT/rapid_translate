@@ -48,7 +48,7 @@ The second implementation uses a more flexible, loop-based approach:
    - Smart waiting periods (3-10 seconds) based on context
    - Message chain optimization to prevent memory bloat
 
-## Determinitic Graph
+## Deterministic Graph
 
 ![LangGraph](https://github.com/NawidT/rapid_translate/blob/main/graph.png)
 
@@ -65,6 +65,6 @@ The second implementation uses a more flexible, loop-based approach:
 - langgraph
 - langchain
 - playwright
-- OpenAI API (GPT-4)
+- OpenAI API (GPT-4o)
 
 [Add screenshots and specific testing results from testing.ipynb]
